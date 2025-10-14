@@ -1,0 +1,7 @@
+# Web Framework
+fastapi
+uvicorn
+
+# Google Cloud Libraries
+google-cloud-pubsub
+google-cloud-firestore
