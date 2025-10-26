@@ -1,0 +1,8 @@
+# GCP Libraries
+
+google-cloud-firestore
+google-cloud-aiplatform
+
+# Git operations
+
+GitPython
