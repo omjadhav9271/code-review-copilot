@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+
+# Required for the Jobs API
+
+google-cloud-run
+
+# Required to parse the event (though we do it manually)
+
+cloudevents

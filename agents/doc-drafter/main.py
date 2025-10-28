@@ -7,100 +7,87 @@ from google.cloud import firestore
 import vertexai
 from vertexai.generative_models import GenerativeModel
 
+# --- Initialize GCP Clients ---
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
+GCP_REGION = os.environ.get("GCP_REGION", "us-central1")
+db = firestore.Client(project=GCP_PROJECT_ID)
+vertexai.init(project=GCP_PROJECT_ID, location=GCP_REGION)
+model = GenerativeModel("gemini-1.5-flash-001")
+transaction = db.transaction()
+
+@firestore.transactional
+def update_firestore_atomically(transaction, review_ref, task_sha, analysis_results):
+    doc_snapshot = review_ref.get(transaction=transaction)
+    current_sha = doc_snapshot.get("pr_info.head_sha")
+
+    if current_sha == task_sha:
+        print(f"SHA match ({task_sha}). Updating Firestore.")
+        transaction.update(review_ref, {
+            "docs_analysis_results": analysis_results, # <-- CHANGED
+            "docs_status": "complete",           # <-- CHANGED
+            "tasks_completed": firestore.Increment(1)
+        })
+    else:
+        print(f"Stale task. SHA mismatch (Task: {task_sha}, Doc: {current_sha}). Aborting update.")
+
 def main():
-    """
-    Main entry point for the Documentation Job.
-    """
-    # 1. Read the task payload from an environment variable
     payload_str = os.environ.get("TASK_PAYLOAD")
     if not payload_str:
         print("Error: TASK_PAYLOAD environment variable not set. Exiting.")
         return
 
-    print(f"Received payload: {payload_str}")
     task_payload = json.loads(payload_str)
-    
     review_id = task_payload["review_id"]
     pr_info = task_payload["pr_info"]
-    repo_full_name = pr_info["repo_full_name"]
-    head_sha = pr_info["head_sha"]
+    task_sha = pr_info["head_sha"] 
     
-    print(f"Starting DOC analysis for review: {review_id}")
-
-    # --- Initialize GCP Clients ---
-    GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
-    GCP_REGION = os.environ.get("GCP_REGION", "us-central1")
+    print(f"Starting DOCS analysis for review: {review_id} (SHA: {task_sha})")
     
-    db = firestore.Client(project=GCP_PROJECT_ID)
-    vertexai.init(project=GCP_PROJECT_ID, location=GCP_REGION)
-    model = GenerativeModel("gemini-1.5-flash-001") 
-
     review_ref = db.collection("reviews").document(review_id)
+    analysis_results = []
 
     try:
-        # 2. Clone the repository
-        repo_url = f"https://github.com/{repo_full_name}.git"
+        # --- 1. Perform all slow analysis *outside* the transaction ---
+        repo_url = f"https://github.com/{pr_info['repo_full_name']}.git"
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = git.Repo.clone_from(repo_url, tmpdir)
-            repo.git.checkout(head_sha)
+            repo.git.checkout(task_sha)
             
-            # 3. Identify changed files
             changed_files = [item.a_path for item in repo.index.diff(None) if item.a_path.endswith(('.py', '.js', '.go', '.md'))]
             
             if not changed_files:
-                print(f"No relevant files changed for {review_id}.")
-                review_ref.update({
-                    "docs_analysis_results": [{"file_path": "N/A", "feedback": "No relevant files were changed."}],
-                    "docs_status": "complete", # <-- UPDATE THIS FIELD
-                    "tasks_completed": firestore.Increment(1)
-                })
-                return
+                analysis_results = [{"file_path": "N/A", "feedback": "No relevant files were changed."}]
+            else:
+                for file_path in changed_files:
+                    try:
+                        with open(os.path.join(tmpdir, file_path), "r", encoding="utf-8") as f:
+                            file_content = f.read()
+                    except Exception:
+                        continue 
 
-            # 4. Analyze each changed file with Gemini
-            analysis_results = []
-            for file_path in changed_files:
-                # ... (error handling for reading file remains the same) ...
-                try:
-                    with open(os.path.join(tmpdir, file_path), "r", encoding="utf-8") as f:
-                        file_content = f.read()
-                except Exception:
-                    continue # Skip files we can't read
+                    prompt = f"..." # Your Docs Gemini prompt
+                    response = model.generate_content([prompt])
+                    analysis_results.append({
+                        "file_path": file_path,
+                        "feedback": response.text.strip()
+                    })
 
-                # --- !!! THIS IS THE MAIN CHANGE !!! ---
-                prompt = f"""
-                You are an expert technical writer. Analyze the following code snippet from the file '{file_path}'.
-                Focus on:
-                - Missing, unclear, or outdated docstrings for functions or classes.
-                - Unclear variable names that need comments.
-                - Code blocks that are complex and require an explanatory comment.
-                - If the file is a `.md` file, check for typos or unclear sentences.
-
-                For any issues found, provide a "before" and "after" suggested change.
-                If no documentation updates are needed, respond with "No documentation updates needed."
-
-                CODE:
-                ```
-                {file_content}
-                ```
-                """
-                
-                response = model.generate_content([prompt])
-                analysis_results.append({
-                    "file_path": file_path,
-                    "feedback": response.text.strip()
-                })
-
-        # 5. Update Firestore
-        review_ref.update({
-            "docs_analysis_results": analysis_results, # <-- NEW FIELD
-            "docs_status": "complete",               # <-- UPDATE THIS FIELD
-            "tasks_completed": firestore.Increment(1)
-        })
-        print(f"Successfully completed DOC analysis for {review_id}")
+        # --- 2. Run the atomic update ---
+        update_firestore_atomically(transaction, review_ref, task_sha, analysis_results)
+        print(f"Successfully completed DOCS analysis for {review_id}")
 
     except Exception as e:
         print(f"Error processing {review_id}: {e}")
-        review_ref.update({"docs_status": "error", "error_message": str(e)})
+        @firestore.transactional
+        def update_error_atomically(transaction, review_ref, task_sha, error_message):
+            doc = review_ref.get(transaction=transaction)
+            if doc.get("pr_info.head_sha") == task_sha:
+                transaction.update(review_ref, {"docs_status": "error", "error_message": str(error_message)}) # <-- CHANGED
+        
+        try:
+            update_error_atomically(transaction, review_ref, task_sha, str(e))
+        except Exception as tx_error:
+            print(f"Failed to write error state: {tx_error}")
 
 if __name__ == "__main__":
     main()
