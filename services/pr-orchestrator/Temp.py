@@ -1,5 +1,5 @@
-# Testing Everything 03
+# Testing Consolidation
 
-print("This is Temp03.py"
-
+print("This is a temporary file for testing purposes.
+      
 01
