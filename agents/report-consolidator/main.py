@@ -60,8 +60,7 @@ def main():
     if not payload_str:
         print("Error: TASK_PAYLOAD environment variable not set.")
         return
-    
-    print(f"Payload string received: '{payload_str}'")
+
     task_payload = json.loads(payload_str)
     review_id = task_payload["review_id"]
     pr_info = task_payload["pr_info"]
