@@ -29,13 +29,13 @@ docs_topic_path = publisher.topic_path(GCP_PROJECT_ID, DOCS_TOPIC_ID)
 def verify_signature(request_body: bytes, signature: str):
     if not signature:
         raise HTTPException(status_code=403, detail="Signature missing")
-    
-    sha_name, signature_hash = signature.split("=", 1)
+    try:
+        sha_name, signature_hash = signature.split("=", 1)
+    except Exception:
+        raise HTTPException(status_code=403, detail="Malformed signature header")
     if sha_name != "sha256":
         raise HTTPException(status_code=501, detail="Unsupported signature algorithm")
-    
     mac = hmac.new(GITHUB_WEBHOOK_SECRET, msg=request_body, digestmod=hashlib.sha256)
-    
     if not hmac.compare_digest(mac.hexdigest(), signature_hash):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
@@ -46,6 +46,7 @@ async def receive_webhook(request: Request):
     signature = request.headers.get("X-Hub-Signature-256")
     request_body = await request.body()
     try:
+        # If secret is empty, signature comparison will still run (but fail) unless webhook was configured without secret.
         verify_signature(request_body, signature)
     except HTTPException as e:
         print(f"Signature verification failed: {e.detail}")
@@ -53,23 +54,35 @@ async def receive_webhook(request: Request):
 
     # 2. Process only relevant pull request actions
     payload = await request.json()
-    if payload.get("action") not in ["opened", "reopened", "synchronize"]:
-        print(f"Ignoring action: {payload.get('action')}")
+    action = payload.get("action")
+    if action not in ["opened", "reopened", "synchronize"]:
+        print(f"Ignoring action: {action}")
         return Response(status_code=204)  # No content
 
-    # 3. Extract key PR information
-    pr_info = {
-        "pr_number": payload["number"],
-        "repo_full_name": payload["repository"]["full_name"],
-        "html_url": payload["pull_request"]["html_url"],
-        "head_sha": payload["pull_request"]["head"]["sha"],
-    }
-    
+    # 3. Extract key PR information (include base_sha/head_ref/base_ref)
+    pr = payload.get("pull_request", {})
+    repo = payload.get("repository", {})
+    try:
+        pr_info = {
+            "pr_number": payload.get("number"),
+            "repo_full_name": repo.get("full_name"),
+            "html_url": pr.get("html_url"),
+            "head_sha": pr.get("head", {}).get("sha"),
+            "base_sha": pr.get("base", {}).get("sha"),
+            # optional convenience fields
+            "head_ref": pr.get("head", {}).get("ref"),
+            "base_ref": pr.get("base", {}).get("ref"),
+        }
+    except Exception as e:
+        print(f"[ERROR] Failed to extract pr_info: {e}")
+        raise HTTPException(status_code=400, detail="Malformed webhook payload")
+
     # 4. Create/update Firestore document for state tracking
     review_id = f"{pr_info['repo_full_name'].replace('/', '_')}_{pr_info['pr_number']}"
     review_ref = db.collection("reviews").document(review_id)
-    
+
     print(f"Creating/updating review document: {review_id}")
+    # Write minimal state to Firestore so workers can check head_sha/base_sha
     await review_ref.set({
         "status": "pending",
         "pr_info": pr_info,
@@ -87,17 +100,19 @@ async def receive_webhook(request: Request):
         "pr_info": pr_info
     }).encode("utf-8")
 
-    # 6. Publish to quality-review topic
-    future_quality = publisher.publish(quality_topic_path, data=message_data)
-    print(f"Published message {future_quality.result()} for review {review_id} to {QUALITY_TOPIC_ID}")
+    # 6/7/8. Publish to review topics
+    try:
+        future_quality = publisher.publish(quality_topic_path, data=message_data)
+        print(f"Published message {future_quality.result()} for review {review_id} to {QUALITY_TOPIC_ID}")
 
-    # 7. Publish to security-review topic
-    future_security = publisher.publish(security_topic_path, data=message_data)
-    print(f"Published message {future_security.result()} for review {review_id} to {SECURITY_TOPIC_ID}")
+        future_security = publisher.publish(security_topic_path, data=message_data)
+        print(f"Published message {future_security.result()} for review {review_id} to {SECURITY_TOPIC_ID}")
 
-    # 8. Publish to docs-review topic
-    future_docs = publisher.publish(docs_topic_path, data=message_data)
-    print(f"Published message {future_docs.result()} for review {review_id} to {DOCS_TOPIC_ID}")
+        future_docs = publisher.publish(docs_topic_path, data=message_data)
+        print(f"Published message {future_docs.result()} for review {review_id} to {DOCS_TOPIC_ID}")
+    except Exception as e:
+        print(f"[ERROR] Failed to publish to Pub/Sub topics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
     return {"status": "success", "review_id": review_id}
 
