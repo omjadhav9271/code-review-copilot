@@ -1,4 +1,2 @@
-
-if else elif
-    
-password="mypassword"
+Print)
+Print)
