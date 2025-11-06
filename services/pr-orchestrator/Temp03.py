@@ -1,2 +1,0 @@
-print("A",9,"hiuih)
-      
