@@ -25,7 +25,7 @@ MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", 1024 * 1024))  # 1 MB defa
 # --- Initialize GCP clients and VertexAI ---
 db = firestore.Client(project=GCP_PROJECT_ID)
 vertexai.init(project=GCP_PROJECT_ID, location=GCP_REGION)
-model = GenerativeModel("gemini-1.0-pro")
+model = GenerativeModel("gemini-2.5-flash")
 
 # Pre-create a transaction object to pass into @firestore.transactional functions
 transaction = db.transaction()
