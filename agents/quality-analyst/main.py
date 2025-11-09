@@ -6,6 +6,12 @@ import tempfile
 import traceback
 from typing import List, Optional, Dict, Any
 
+# --- NEW IMPORTS ---
+import time
+import random
+from google.api_core import exceptions as api_exceptions
+# --- END NEW IMPORTS ---
+
 import requests
 import git
 from google.cloud import firestore
@@ -106,7 +112,9 @@ def update_error_atomically(transaction, review_ref, task_sha, error_message):
     current_pr_info = doc_snapshot.get("pr_info") or {}
     current_sha = current_pr_info.get("head_sha")
     if current_sha == task_sha:
-        transaction.update(review_ref, {"quality_status": "error", "error_message": str(error_message)})
+        # --- MODIFIED: USE AGENT-SPECIFIC ERROR KEY ---
+        transaction.update(review_ref, {"quality_status": "error", "quality_error": str(error_message)})
+        # --- END MODIFIED ---
 
 # ---------------- Git fallback helpers ----------------
 def compute_changed_files_via_clone(repo_url: str, head_sha: str, base_sha: Optional[str]) -> List[str]:
@@ -171,6 +179,37 @@ def read_file_from_git(repo_url: str, sha: str, file_path: str) -> Optional[str]
             print(f"[WARN] git show failed for {file_path} at {sha}: {e}")
             return None
 
+# --- NEW HELPER FUNCTION ---
+def generate_content_with_retry(model, prompt, max_retries=3):
+    """Calls model.generate_content with exponential backoff for 429 errors."""
+    retries = 0
+    while retries < max_retries:
+        try:
+            # Send the request
+            response = model.generate_content([prompt])
+            # If successful, return the response
+            return response
+        except (
+            api_exceptions.ResourceExhausted,  # 429
+            api_exceptions.ServiceUnavailable, # 503
+            api_exceptions.InternalServerError # 500
+        ) as e:
+            # Catch specific retryable API errors
+            retries += 1
+            if retries >= max_retries:
+                print(f"[ERROR] Max retries reached. Model call failed: {e}")
+                raise e # Re-raise the last exception
+            
+            # Exponential backoff with jitter: 2^retries + random_fraction
+            wait_time = (2 ** retries) + random.random()
+            print(f"[WARN] Model API retryable error ({e.__class__.__name__}): Retrying in {wait_time:.2f}s... ({retries}/{max_retries})")
+            time.sleep(wait_time)
+        except Exception as e:
+            # Catch any other non-retryable error (like a 400 Bad Request)
+            print(f"[ERROR] Model call failed with non-retryable error: {e}")
+            raise e # Re-raise immediately
+# --- END NEW HELPER FUNCTION ---
+
 # ---------------- Main ----------------
 def main():
     payload_str = os.environ.get("TASK_PAYLOAD")
@@ -223,7 +262,7 @@ def main():
                     repo_url = f"https://github.com/{repo_full_name}.git"
                     changed_file_paths = compute_changed_files_via_clone(repo_url, task_sha, base_sha)
                     # filter by extensions
-                    changed_file_paths = [p for p in changed_file_paths if p.endswith(('.py', '.js', '.go'))]
+                    changed_file_paths = [p for p in changed_file_paths if p.endswith(('.py', '.js', 'go'))]
                     print(f"[INFO] Clone fallback returned {len(changed_file_paths)} relevant files.")
                 except Exception as e:
                     print(f"[ERROR] Clone fallback failed: {e}")
@@ -263,15 +302,24 @@ def main():
 
             # --- Run the model analysis (Gemini) ---
             try:
+                # *** MODIFIED PROMPT START ***
                 prompt = (
-                    f"Perform quality code review of the file `{file_path}` in repository `{repo_full_name}`.\n"
+                    f"Analyze the quality of the file `{file_path}` from repository `{repo_full_name}`.\n"
                     f"PR: {pr_number} SHA: {task_sha}\n\n"
                     f"File contents:\n```\n{file_content}\n```\n\n"
-                    "Provide concise, actionable feedback (bugs, style, complexity, security concerns, tests missing) "
-                    "and a short severity score (low/medium/high)."
+                    "Your task is to act as a **code quality analyst**. Focus *only* on the following:\n"
+                    "- **Code Smells:** (e.g., long methods, duplicate code, large classes, etc.)\n"
+                    "- **Complexity Issues:** (e.g., high cyclomatic complexity, deep nesting)\n"
+                    "- **Best Practices:** (e.g., non-adherence to idiomatic code, potential bugs, missing error handling, poor readability)\n\n"
+                    "**DO NOT** comment on security vulnerabilities or documentation (other services will handle that).\n\n"
+                    "Provide concise, actionable feedback for any issues found and a short severity score (low/medium/high)."
                 )
-                # Using model.generate_content per your prior code shape
-                response = model.generate_content([prompt])
+                # *** MODIFIED PROMPT END ***
+
+                # --- MODIFIED CALL: USE RETRY HELPER ---
+                response = generate_content_with_retry(model, prompt)
+                # --- END MODIFIED CALL ---
+
                 # response may be a list or object depending on SDK; attempt robust access:
                 feedback_text = None
                 if hasattr(response, "text"):

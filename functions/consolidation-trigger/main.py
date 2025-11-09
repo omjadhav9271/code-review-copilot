@@ -1,3 +1,4 @@
+# functions/consolidation-trigger/main.py
 import os
 import json
 from google.cloud import pubsub_v1
@@ -43,19 +44,38 @@ def check_completion(cloud_event, context):
         total_tasks = data.get("total_tasks", -1) # Default to -1 to avoid 0==0
         status = data.get("status", "")
         
-        # --- The Core Logic ---
-        if tasks_completed == total_tasks and status == "pending":
+        # --- THE CORRECTED LOGIC ---
+        if tasks_completed >= total_tasks and status == "pending":
             print(f"All {total_tasks} tasks complete for {doc_ref.id}. Triggering consolidation.")
             
             # 1. Lock the document to prevent re-triggering
             transaction.update(doc_ref, {"status": "consolidating"})
             
-            # 2. Publish the consolidation task
+            # --- START OF FIX ---
+            # Create a JSON-safe dictionary.
+            # This explicitly omits the 'created_at' (datetime) field
+            # and only includes what the consolidator needs.
+            safe_data = {
+                "quality_status": data.get("quality_status"),
+                "quality_analysis_results": data.get("quality_analysis_results", []),
+                "quality_error": data.get("quality_error"),
+
+                "security_status": data.get("security_status"),
+                "security_analysis_results": data.get("security_analysis_results", []),
+                "security_error": data.get("security_error"),
+
+                "docs_status": data.get("docs_status"),
+                "docs_analysis_results": data.get("docs_analysis_results", []),
+                "docs_error": data.get("docs_error"),
+            }
+            
+            # 2. Publish the new safe_data payload
             message_data = json.dumps({
                 "review_id": doc_ref.id,
-                "pr_info": data.get("pr_info"),
-                "full_data": data # Pass all data so the job doesn't need to read again
+                "pr_info": data.get("pr_info"), # pr_info is already a JSON-safe map
+                "full_data": safe_data         # <--- FIXED
             }).encode("utf-8")
+            # --- END OF FIX ---
             
             publisher.publish(consolidation_topic_path, data=message_data)
         else:

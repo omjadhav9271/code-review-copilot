@@ -1,3 +1,4 @@
+# services/report-consolidator-executor/main.py
 import os
 import base64
 from fastapi import FastAPI, Request, HTTPException, Response
@@ -30,13 +31,23 @@ async def handle_event(request: Request):
         # 3. Define environment variable override
         env_var = EnvVar(name="TASK_PAYLOAD", value=message_data_str)
 
+        # --- START OF FIX ---
+        # Forward the GITHUB_TOKEN from this service to the job
+        extra_env = []
+        github_token = os.environ.get("GITHUB_TOKEN")
+        if github_token:
+            extra_env.append(EnvVar(name="GITHUB_TOKEN", value=github_token))
+        else:
+            print("[WARN] GITHUB_TOKEN not set in executor service, job may fail.")
+        # --- END OF FIX ---
+
         # 4. Construct the job run request with overrides
         run_job_request = RunJobRequest(
             name=TARGET_JOB_PATH,
             overrides=RunJobRequest.Overrides(
                 container_overrides=[
                     RunJobRequest.Overrides.ContainerOverride(
-                        env=[env_var]
+                        env=[env_var] + extra_env  # <--- FIXED
                     )
                 ]
             )
