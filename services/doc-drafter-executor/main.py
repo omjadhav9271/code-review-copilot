@@ -27,8 +27,18 @@ async def handle_event(request: Request):
         # 2. Extract and decode the Pub/Sub message data
         message_data_str = base64.b64decode(event["message"]["data"]).decode("utf-8")
         
-        # 3. Define environment variable override
-        env_var = EnvVar(name="TASK_PAYLOAD", value=message_data_str)
+        # 3. Define environment variable override for the task payload
+        task_payload_env_var = EnvVar(name="TASK_PAYLOAD", value=message_data_str)
+
+        # --- START OF FIX ---
+        # Forward the GITHUB_TOKEN from this service to the job
+        extra_env = []
+        github_token = os.environ.get("GITHUB_TOKEN")
+        if github_token:
+            extra_env.append(EnvVar(name="GITHUB_TOKEN", value=github_token))
+        else:
+            print("[WARN] GITHUB_TOKEN not set in doc-drafter-executor service, job may fail if analyzing private repos.")
+        # --- END OF FIX ---
 
         # 4. Construct the job run request with overrides
         run_job_request = RunJobRequest(
@@ -36,7 +46,7 @@ async def handle_event(request: Request):
             overrides=RunJobRequest.Overrides(
                 container_overrides=[
                     RunJobRequest.Overrides.ContainerOverride(
-                        env=[env_var]
+                        env=[task_payload_env_var] + extra_env # <--- MODIFIED: Added extra_env
                     )
                 ]
             )
