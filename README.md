@@ -4,6 +4,129 @@ A serverless, multi-agent AI system that automatically reviews GitHub pull reque
 
 This is a **headless B2D (Business-to-Developer) tool**. Its "frontend" is the GitHub pull request interface itself, posting synthesized reports as PR comments to meet developers exactly where they work.
 
+---
+
+## 🧩 System Architecture Diagram
+
+![Architecture diagram](./architecture_diagram.png)
+
+---
+
+
+## 🧭 Detailed System Architecture Flow
+
+## Stage 1: Orchestration (Fan-Out)
+This is where the entire process begins.
+
+### 1. GitHub Webhook Trigger:
+**Action:** A developer creates or updates a Pull Request (PR) in GitHub.  
+**Event:** GitHub sends a `pull_request` webhook event.
+
+### 2. pr-orchestrator Service:
+**Receives:** The GitHub webhook event.  
+**Validates:** It verifies the `GITHUB_WEBHOOK_SECRET` to ensure the event is legitimate.  
+
+**Initializes State:**  
+**Action:** Creates a new document in Firestore.  
+**Content:** This document stores the PR's `head_sha`, `pr_id`, `repo_owner`, `repo_name`, `status: "pending"`, and `total_tasks: 3`. This is crucial for tracking the review.
+
+### 3. Task Fan-Out to Pub/Sub:
+**Action:** `pr-orchestrator` prepares three separate "task payloads" (JSON strings containing PR info, SHA, etc.), one for each specialist agent.  
+**Publishes:** It publishes these payloads to three distinct Pub/Sub topics.
+
+---
+
+## Stage 2: Specialist Execution (Triggering Agents)
+This stage shows how the specialist agents are launched.
+
+### 1. Executor Services:
+- `quality-analyst-executor`
+- `security-specialist-executor`
+- `doc-drafter-executor`
+
+**Listen:** Each executor service is configured with an Eventarc trigger that listens to one specific Pub/Sub topic (e.g., `quality-analyst-executor` listens to `code-review-tasks`).
+
+### 2. Launching Agent Jobs:
+**Receives:** An executor service receives a message from its Pub/Sub topic (via Eventarc).  
+**Action:** It extracts the `TASK_PAYLOAD` from the Pub/Sub message.  
+**Launches:** It then uses the Cloud Run Jobs API to start a new instance of its corresponding specialist Cloud Run Job, passing the `TASK_PAYLOAD` and the `GITHUB_TOKEN` as environment variables to the job.
+
+- `quality-analyst`
+- `security-specialist`
+- `doc-drafter`
+
+---
+
+## Stage 3: Agent Work (Parallel Processing)
+This is where the actual AI analysis happens concurrently.
+
+### 1. Specialist Agent Jobs (`quality-analyst`, `security-specialist`, `doc-drafter`):
+**Receives:** Each job starts and receives its specific `TASK_PAYLOAD` and `GITHUB_TOKEN`.
+
+**Fetches Code:**  
+**Action:** Uses the GitHub API (with `GITHUB_TOKEN`) to fetch file contents for the specified `head_sha`.  
+**Fallback:** If the file is too large or API fails, it performs a shallow git clone.
+
+**AI Analysis:**  
+**Action:** Constructs a highly-specialized prompt based on its role (e.g., security, quality, docs) and the fetched code.  
+**Calls:** Makes an API call to Vertex AI Gemini.
+
+**Updates Firestore (Atomic Write):**  
+**Action:** Writes its specific analysis results (e.g., `quality_analysis_results`, `security_analysis_results`, `docs_analysis_results`) back to the original Firestore document using an atomic transaction.  
+**Crucial Detail:** This write atomically increments a `tasks_completed` counter in Firestore (e.g., from 0 to 1, then 1 to 2, then 2 to 3).  
+**Resilience:** The write is conditional on the `head_sha` to prevent stale data.
+
+---
+
+## Stage 4: Consolidation (Fan-In)
+This stage orchestrates the gathering of all results.
+
+### 1. consolidation-trigger Cloud Function:
+**Listens:** This function is triggered specifically by updates to Firestore documents.  
+
+**Event Logic:**  
+**Receives:** A Firestore document update event.  
+**Checks:** It inspects the updated document:  
+- Is `tasks_completed >= total_tasks`? (e.g., is it 3 or more?)  
+- Is `status == "pending"`? (Has it not been consolidated yet?)  
+**Locks:** If both conditions are true, it performs an atomic update to the Firestore document, setting `status: "consolidating"`. This "locks" the document to ensure the consolidation only runs once.
+
+### 2. Publish Consolidation Task:
+**Action:** If the `consolidation-trigger` successfully locks the document, it publishes a single message to the `consolidation-tasks` Pub/Sub topic. This message contains the Firestore document ID or relevant PR info.
+
+### 3. report-consolidator-executor Service:
+**Listens:** This service is configured with an Eventarc trigger that listens to the `consolidation-tasks` Pub/Sub topic.  
+**Launches:** It launches the `report-consolidator` Cloud Run Job, passing the task payload (which tells it which Firestore document to read) and the `GITHUB_TOKEN`.
+
+---
+
+## Stage 5: Final Report
+This is the concluding stage where the user sees the output.
+
+### 1. report-consolidator Job:
+**Receives:** Starts and receives its task payload and `GITHUB_TOKEN`.
+
+**Reads Firestore:**  
+**Action:** Reads the complete review document from Firestore, which now contains all the individual agent reports and any error statuses.
+
+**Synthesizes Report:**  
+**Action:** Uses Vertex AI Gemini again, this time with a prompt to synthesize all the individual reports (and any error messages) into a single, well-formatted Markdown comment.
+
+**Posts to GitHub PR:**  
+**Action:** Uses the GitHub API (with `GITHUB_TOKEN`) to post the synthesized Markdown comment to the relevant Pull Request.
+
+**Final State Update:**  
+**Action:** Updates the Firestore document's `status` to `"complete"`.
+
+---
+
+## Summary of the Flow (Mental Check)
+1. GitHub PR Event -> `pr-orchestrator` (creates Firestore state, publishes tasks)  
+2. Pub/Sub Topics -> Executor Services (launch Agent Jobs)  
+3. Agent Jobs (read code, call Gemini, update Firestore atomically)  
+4. Firestore Update -> `consolidation-trigger` (checks status, publishes final task)  
+5. `consolidation-tasks` Pub/Sub -> `report-consolidator-executor` (launches final Report Job)  
+6. `report-consolidator` Job (reads Firestore, calls Gemini, posts comment to GitHub, updates Firestore to `"complete"`)
 
 
 ---
