@@ -1,1 +1,2 @@
-for while 23
+def 123:
+    pass
