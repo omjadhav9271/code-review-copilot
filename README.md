@@ -6,6 +6,15 @@ This is a **headless B2D (Business-to-Developer) tool**. Its "frontend" is the G
 
 ---
 
+## ▶️ Video Gallery
+### 1. Project Introduction:
+[![Video](https://img.shields.io/badge/Video-Click%20Here-green?logo=youtube)](https://youtu.be/FjJ22spJzDU?si=6-5XdGL_ne9o5k3u)
+
+### 2. Project Implementation:
+[![Video](https://img.shields.io/badge/Video-Click%20Here-green?logo=youtube)](https://youtu.be/6nspXaH8NmY?si=NUt8Me-qDGiNcXdn)
+
+---
+
 ## 🧩 System Architecture Diagram
 
 ![Architecture diagram](./architecture_diagram.png)
