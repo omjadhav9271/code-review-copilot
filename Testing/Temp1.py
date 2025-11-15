@@ -1,3 +1,8 @@
-def login(user,pwd): """authenticates user""" print("Attempt:", user)  
-token = "hardcoded-secret"                                            
-print("Result: " + result)                                          
+"""sumary_line
+
+Keyword arguments:
+argument -- description
+Return: return_description
+
+
+print("Hello World !!")
