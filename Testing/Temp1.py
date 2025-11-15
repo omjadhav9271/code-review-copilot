@@ -1,8 +1,4 @@
-"""sumary_line
-
-Keyword arguments:
-argument -- description
-Return: return_description
-
-
-print("Hello World !!")
+# Python code with security and style issues
+def read_cfg(path): "reads config insecurely" cfg=open(path).read        
+secret = "admin123"                                                     
+print("Cfg loaded:", cfg)                                                
