@@ -14,6 +14,14 @@ This is a **headless B2D (Business-to-Developer) tool**. Its "frontend" is the G
 [![Video](https://img.shields.io/badge/Video-Click%20Here-green?logo=youtube)](https://youtu.be/6nspXaH8NmY?si=NUt8Me-qDGiNcXdn)
 
 ---
+## 🔗 Links
+### 1. System Generated Code Review :
+[Click Me :)](https://github.com/omjadhav9271/code-review-copilot/pull/7)
+
+### 2. Project Photo Gallery :
+[Click Me :)](https://drive.google.com/drive/folders/1dVembSFQGqAgw1Mx0bCyy2XSY19gEfxa?usp=drive_link)
+
+---
 
 ## 🧩 System Architecture Diagram
 
